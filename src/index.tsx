@@ -234,34 +234,51 @@ export function Text({ style, props }: TextProps) {
   }
   if (segStart < len) segments.push({ start: segStart, end: len });
 
+  // 同一 link（相同 href+targetBlank）的连续 segment 合并为一组，每组只渲染一个 <a>
+  const linkKey = (l: InlineLink | null) => (l ? `${l.href}|${l.targetBlank ? '1' : '0'}` : '');
+  const groups: { linkKey: string; link: InlineLink | null; segments: { start: number; end: number }[] }[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const effectiveLink = getEffectiveLinkAt(links, seg.start);
+    const key = linkKey(effectiveLink);
+    if (groups.length > 0 && groups[groups.length - 1].linkKey === key) {
+      groups[groups.length - 1].segments.push(seg);
+    } else {
+      groups.push({ linkKey: key, link: effectiveLink, segments: [seg] });
+    }
+  }
+
   return (
     <div style={baseStyle}>
-      {segments.map((seg, idx) => (
-        (() => {
+      {groups.map((grp, gi) => {
+        const inner = grp.segments.map((seg, si) => {
           const effectiveStyle = getEffectiveStyleAt(style, runs, seg.start);
-          const effectiveLink = getEffectiveLinkAt(links, seg.start);
           const segmentText = text.slice(seg.start, seg.end);
-          const span = (
-            <span key={idx} style={styleToCss(effectiveStyle)}>
+          return (
+            <span key={`${gi}-${si}`} style={styleToCss(effectiveStyle)}>
               {segmentText}
             </span>
           );
-          if (!effectiveLink) return span;
-          const safeHref = getSafeHref(effectiveLink.href);
-          if (!safeHref) return span;
-          return (
-            <a
-              key={idx}
-              href={safeHref}
-              target={effectiveLink.targetBlank ? '_blank' : undefined}
-              rel={effectiveLink.targetBlank ? 'noopener noreferrer' : undefined}
-              style={{ color: 'inherit', textDecoration: 'inherit' }}
-            >
-              {span}
-            </a>
-          );
-        })()
-      ))}
+        });
+        if (!grp.link) {
+          return <React.Fragment key={gi}>{inner}</React.Fragment>;
+        }
+        const safeHref = getSafeHref(grp.link.href);
+        if (!safeHref) {
+          return <React.Fragment key={gi}>{inner}</React.Fragment>;
+        }
+        return (
+          <a
+            key={gi}
+            href={safeHref}
+            target={grp.link.targetBlank ? '_blank' : undefined}
+            rel={grp.link.targetBlank ? 'noopener noreferrer' : undefined}
+            style={{ color: 'inherit', textDecoration: 'inherit' }}
+          >
+            {inner}
+          </a>
+        );
+      })}
     </div>
   );
 }
