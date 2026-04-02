@@ -1,7 +1,13 @@
 import React, { CSSProperties } from 'react';
 import { z } from 'zod';
 
-import EmailMarkdown from './EmailMarkdown';
+import {
+  DEFAULT_TEXT_HTML,
+  buildTemplateHtmlFromMessageAndVariables,
+  legacyMessageToHtml,
+  legacyTextToHtml,
+  sanitizeTextHtml,
+} from './sanitizeTextHtml';
 
 const FONT_FAMILY_SCHEMA = z
   .enum([
@@ -18,7 +24,7 @@ const FONT_FAMILY_SCHEMA = z
   .nullable()
   .optional();
 
-function getFontFamily(fontFamily: z.infer<typeof FONT_FAMILY_SCHEMA>) {
+export function getFontFamily(fontFamily: z.infer<typeof FONT_FAMILY_SCHEMA>) {
   switch (fontFamily) {
     case 'MODERN_SANS':
       return '"Helvetica Neue", "Arial Nova", "Nimbus Sans", Arial, sans-serif';
@@ -85,6 +91,15 @@ const INLINE_LINK_SCHEMA = z.object({
   targetBlank: z.boolean().optional().nullable(),
 });
 
+/** Text 块内「插入式变量」清单：与 message 中 token 顺序一致，用于 JSON 还原时区分手打 {{}} */
+export const TextTemplateVariableEntrySchema = z.object({
+  variableInstanceId: z.string().optional().nullable(),
+  attribute: z.string(),
+  variable: z.string(),
+});
+
+export type TextTemplateVariableEntry = z.infer<typeof TextTemplateVariableEntrySchema>;
+
 export const TextPropsSchema = z.object({
   style: z
     .object({
@@ -104,7 +119,11 @@ export const TextPropsSchema = z.object({
     .nullable(),
   props: z
     .object({
-      markdown: z.boolean().optional().nullable(),
+      /** 正文 HTML：内层 div + 多个 p，无 \\n 存储换行 */
+      html: z.string().optional().nullable(),
+      /** 纯文本 message：用于落库/索引/模板渲染（包含 {{}} / {% %} token），不含编辑器占位符 */
+      message: z.string().optional().nullable(),
+      /** 旧版纯文本（无换行），读时迁移为 html */
       text: z.string().optional().nullable(),
       inlineRuns: z
         .array(
@@ -116,10 +135,15 @@ export const TextPropsSchema = z.object({
         )
         .optional()
         .nullable(),
-      inlineLinks: z
-        .array(INLINE_LINK_SCHEMA)
-        .optional()
-        .nullable(),
+      inlineLinks: z.array(INLINE_LINK_SCHEMA).optional().nullable(),
+      markdown: z.boolean().optional().nullable(),
+      /** 变量默认值：key 为 span data-variable-instance-id（同一变量名多次插入各自独立），value 为默认展示文本 */
+      variableDefaults: z.record(z.string()).optional().nullable(),
+      /**
+       * 插入式变量声明（与 `message` 中线性顺序一致）。解析模板时仅这些位置的 `{{}}`/`{% %}` 会还原为变量 span；
+       * 未列入的同类字符视为手打纯文本。
+       */
+      variables: z.array(TextTemplateVariableEntrySchema).optional().nullable(),
     })
     .optional()
     .nullable(),
@@ -128,7 +152,7 @@ export const TextPropsSchema = z.object({
 export type TextProps = z.infer<typeof TextPropsSchema>;
 
 export const TextPropsDefaults = {
-  text: '',
+  html: DEFAULT_TEXT_HTML,
 };
 
 function getLetterSpacing(v: number | string | null | undefined): string | undefined {
@@ -138,37 +162,8 @@ function getLetterSpacing(v: number | string | null | undefined): string | undef
 }
 
 type TextStyle = NonNullable<TextProps['style']>;
-type InlineRun = { start: number; end: number; style: Record<string, unknown> };
-type InlineLink = { start: number; end: number; href: string; targetBlank?: boolean | null };
 
-function getEffectiveStyleAt(global: TextStyle | null | undefined, runs: InlineRun[] | null | undefined, index: number): TextStyle {
-  const s: TextStyle = { ...global } as TextStyle;
-  if (!runs) return s;
-  for (const run of runs) {
-    if (index >= run.start && index < run.end && run.style) {
-      Object.assign(s, run.style);
-    }
-  }
-  return s;
-}
-
-function getEffectiveLinkAt(links: InlineLink[] | null | undefined, index: number): InlineLink | null {
-  if (!links) return null;
-  for (const l of links) {
-    if (index >= l.start && index < l.end) return l;
-  }
-  return null;
-}
-
-function getSafeHref(href: string): string | null {
-  if (!href) return null;
-  const v = href.trim();
-  if (/^https?:\/\//i.test(v)) return v;
-  if (/^mailto:/i.test(v)) return v;
-  return null;
-}
-
-function styleToCss(s: TextStyle | null | undefined): CSSProperties {
+export function styleToCss(s: TextStyle | null | undefined): CSSProperties {
   if (!s) return {};
   return {
     color: s.color ?? undefined,
@@ -183,102 +178,55 @@ function styleToCss(s: TextStyle | null | undefined): CSSProperties {
   };
 }
 
+export function getResolvedTextBodyHtml(props: TextProps['props'] | null | undefined): string {
+  const html = props?.html;
+  if (typeof html === 'string' && html.trim()) {
+    return sanitizeTextHtml(html);
+  }
+
+  const msg = typeof props?.message === 'string' ? props.message : '';
+  const txt = typeof props?.text === 'string' ? props.text : '';
+  const source = msg !== '' ? msg : txt;
+  const variables = props?.variables;
+
+  if (source !== '') {
+    if (Array.isArray(variables) && variables.length > 0) {
+      return sanitizeTextHtml(buildTemplateHtmlFromMessageAndVariables(source, variables));
+    }
+    if (msg !== '') {
+      return sanitizeTextHtml(legacyMessageToHtml(msg));
+    }
+    return sanitizeTextHtml(legacyTextToHtml(txt));
+  }
+
+  return sanitizeTextHtml(DEFAULT_TEXT_HTML);
+}
+
+function resolveBodyHtml(props: TextProps['props']): string {
+  return getResolvedTextBodyHtml(props ?? null);
+}
+
 export function Text({ style, props }: TextProps) {
-  const text = props?.text ?? TextPropsDefaults.text;
-  const inlineRuns = props?.inlineRuns ?? null;
-  const inlineLinks = props?.inlineLinks ?? null;
   const baseStyle: CSSProperties = {
     ...styleToCss(style),
     textAlign: style?.textAlign ?? undefined,
     padding: getPadding(style?.padding),
-    whiteSpace: 'pre-line',
+    margin: 0,
   };
 
-  if (props?.markdown) {
-    return <EmailMarkdown style={baseStyle} markdown={text} />;
-  }
-
-  const len = text.length;
-  const runs = (inlineRuns ?? [])
-    .filter((r) => r.end > r.start && r.start < len)
-    .map((r) => ({
-      start: Math.max(0, r.start),
-      end: Math.min(len, r.end),
-      style: r.style || {},
-    }));
-
-  const links = inlineLinks
-    ?.filter((l) => l.end > l.start && l.start < len)
-    .map((l) => ({
-      start: Math.max(0, l.start),
-      end: Math.min(len, l.end),
-      href: l.href,
-      targetBlank: l.targetBlank ?? null,
-    })) ?? null;
-
-  const segments: { start: number; end: number }[] = [];
-  let segStart = 0;
-  for (let i = 1; i <= len; i++) {
-    const styleA = JSON.stringify(styleToCss(getEffectiveStyleAt(style, runs, segStart)));
-    const styleB = JSON.stringify(styleToCss(getEffectiveStyleAt(style, runs, i < len ? i : len - 1)));
-    const linkA = getEffectiveLinkAt(links, segStart);
-    const linkB = getEffectiveLinkAt(links, i < len ? i : len - 1);
-    const linkKeyA = linkA ? `${linkA.href}|${linkA.targetBlank ? '1' : '0'}` : '';
-    const linkKeyB = linkB ? `${linkB.href}|${linkB.targetBlank ? '1' : '0'}` : '';
-    const keyA = `${styleA}|${linkKeyA}`;
-    const keyB = `${styleB}|${linkKeyB}`;
-    if (keyA !== keyB) {
-      segments.push({ start: segStart, end: i });
-      segStart = i;
-    }
-  }
-  if (segStart < len) segments.push({ start: segStart, end: len });
-
-  // 同一 link（相同 href+targetBlank）的连续 segment 合并为一组，每组只渲染一个 <a>
-  const linkKey = (l: InlineLink | null) => (l ? `${l.href}|${l.targetBlank ? '1' : '0'}` : '');
-  const groups: { linkKey: string; link: InlineLink | null; segments: { start: number; end: number }[] }[] = [];
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-    const effectiveLink = getEffectiveLinkAt(links, seg.start);
-    const key = linkKey(effectiveLink);
-    if (groups.length > 0 && groups[groups.length - 1].linkKey === key) {
-      groups[groups.length - 1].segments.push(seg);
-    } else {
-      groups.push({ linkKey: key, link: effectiveLink, segments: [seg] });
-    }
-  }
+  const innerHtml = resolveBodyHtml(props ?? null);
 
   return (
     <div style={baseStyle}>
-      {groups.map((grp, gi) => {
-        const inner = grp.segments.map((seg, si) => {
-          const effectiveStyle = getEffectiveStyleAt(style, runs, seg.start);
-          const segmentText = text.slice(seg.start, seg.end);
-          return (
-            <span key={`${gi}-${si}`} style={styleToCss(effectiveStyle)}>
-              {segmentText}
-            </span>
-          );
-        });
-        if (!grp.link) {
-          return <React.Fragment key={gi}>{inner}</React.Fragment>;
-        }
-        const safeHref = getSafeHref(grp.link.href);
-        if (!safeHref) {
-          return <React.Fragment key={gi}>{inner}</React.Fragment>;
-        }
-        return (
-          <a
-            key={gi}
-            href={safeHref}
-            target={grp.link.targetBlank ? '_blank' : undefined}
-            rel={grp.link.targetBlank ? 'noopener noreferrer' : undefined}
-            style={{ color: 'inherit', textDecoration: 'inherit' }}
-          >
-            {inner}
-          </a>
-        );
-      })}
+      <div dangerouslySetInnerHTML={{ __html: innerHtml }} />
     </div>
   );
 }
+
+export {
+  DEFAULT_TEXT_HTML,
+  buildTemplateHtmlFromMessageAndVariables,
+  legacyMessageToHtml,
+  legacyTextToHtml,
+  sanitizeTextHtml,
+} from './sanitizeTextHtml';
