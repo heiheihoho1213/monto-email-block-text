@@ -71,7 +71,7 @@ function createVariableInstanceId(): string {
 const VARIABLE_TOKEN_IN_TEXT_RE = /\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}|\{\%([A-Za-z_][A-Za-z0-9_]*)\%\}/g;
 
 const VARIABLE_SPAN_STYLE =
-  'white-space:nowrap;display:inline-block;overflow-wrap:normal;word-break:normal;border:1px solid rgba(25, 118, 210, 0.55);border-radius:4px;padding:0 4px;box-shadow:inset 0 -999px 0 rgba(25, 118, 210, 0.08);user-select:all;-webkit-user-select:all';
+  'white-space:nowrap;display:inline-block;overflow-wrap:normal;word-break:normal';
 
 function variableSpanHtml(tokenText: string, instanceId: string): string {
   const dt = escapeHtmlAttr(tokenText);
