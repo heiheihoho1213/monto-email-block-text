@@ -88,11 +88,12 @@ export function buildTemplateHtmlFromMessageAndVariables(
     variableInstanceId?: string | null;
     attribute: string;
     variable: string;
+    type?: 'user' | 'system' | null;
   }>,
 ): string {
   if (!message) return DEFAULT_TEXT_HTML;
   const lines = message.split('\n');
-  let qi = 0;
+  const used = new Set<number>();
   let body = '<div style="margin:0;padding:0;">';
   for (const line of lines) {
     if (line === '') {
@@ -108,18 +109,28 @@ export function buildTemplateHtmlFromMessageAndVariables(
       const raw = m[0];
       const name = (m[1] || m[2])!;
       const builtin = !!m[2];
-      const spec = variables[qi];
-      const specAttr = (spec?.attribute ?? '').trim();
-      const specVar = (spec?.variable ?? '').trim();
-      const specOk =
-        !!spec &&
-        specAttr === name &&
-        specVar === raw &&
-        (builtin ? specVar.startsWith('{%') : specVar.startsWith('{{'));
+      let matchedIndex = -1;
+      for (let i = 0; i < variables.length; i++) {
+        if (used.has(i)) continue;
+        const spec = variables[i];
+        const specAttr = (spec?.attribute ?? '').trim();
+        const specVar = (spec?.variable ?? '').trim();
+        const specType = (spec?.type ?? '').trim();
+        const isSystem = specType === 'system' || (!specType && specVar.startsWith('{%'));
+        const isUser = specType === 'user' || (!specType && specVar.startsWith('{{'));
+        const typeOk = builtin ? isSystem : isUser;
+        const specOk = !!spec && specAttr === name && specVar === raw && typeOk;
+        if (specOk) {
+          matchedIndex = i;
+          break;
+        }
+      }
+      const spec = matchedIndex >= 0 ? variables[matchedIndex] : null;
+      const specOk = matchedIndex >= 0;
       if (specOk) {
-        const iid = (spec.variableInstanceId ?? '').trim() || createVariableInstanceId();
+        const iid = (spec!.variableInstanceId ?? '').trim() || createVariableInstanceId();
         body += variableSpanHtml(raw, iid);
-        qi += 1;
+        used.add(matchedIndex);
       } else {
         body += escapeHtml(raw);
       }

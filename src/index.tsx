@@ -96,6 +96,7 @@ export const TextTemplateVariableEntrySchema = z.object({
   variableInstanceId: z.string().optional().nullable(),
   attribute: z.string(),
   variable: z.string(),
+  type: z.enum(['user', 'system']).optional().nullable(),
 });
 
 export type TextTemplateVariableEntry = z.infer<typeof TextTemplateVariableEntrySchema>;
